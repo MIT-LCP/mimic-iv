@@ -1,158 +1,109 @@
--- note this duplicates prescriptions
--- each ICU stay in the same hospitalization will get a copy of all prescriptions for that hospitalization
-WITH ab_tbl AS 
+-- Note this query does not do much in the way of finding suspicion of infections before ICU admission, in that case the prescriptions table should be incorporated
+
+-- We explore the idea of splitting medications by different treatment cycles and removing patients with isolated antibiotic events 
+
+-- As mentioned in the sepsis-3 paper, isolated cases of antibiotics would not satisfy the requirement for a suspicion of infection. We need another dose of antibiotics within 96 hours of the first one
+
+with abx_partition as
+(
+select *,
+ sum( new_antibiotics_cycle )
+      over ( partition by stay_id, antibiotic_name order by stay_id, starttime )
+    as abx_num
+ from
+  (select subject_id, hadm_id, stay_id, starttime, endtime
+   , label as antibiotic_name
+   -- Check if the same antibiotics was taken in the last 4 days
+   , case when starttime <= datetime_add(lag(endtime) over (partition by stay_id, label order by stay_id, starttime), interval 96 hour) then 0 else 1 end as new_antibiotics_cycle
+   , datetime_diff(lead(starttime) over (partition by stay_id order by stay_id, starttime), endtime, second)/3600 as next_antibio_time
+   --, datetime_diff(lead(starttime) over (partition by stay_id order by stay_id, starttime), endtime, hour) as next_antibio_time
+   , case when lead(starttime) over (partition by stay_id order by stay_id, starttime)  <= datetime_add(endtime, interval 96 hour) then 0 else 1 end as isolated_case
+   from `physionet-data.mimic_icu.inputevents` input
+inner join `physionet-data.mimic_icu.d_items` d on input.itemid = d.itemid
+where upper(d.category) like '%ANTIBIOTICS%'
+) A
+order by subject_id, hadm_id, stay_id, starttime
+)
+
+-- group the antibiotic information together to form courses of antibiotics and also to check whether they are isolated cases
+
+-- note the last drug dose taken by the patient will be classed as an isolated case. However, if this is of the same type as antibiotics given to patient within last 4 days, then it will be aggreagated with the other doses in the next query.
+
+, abx_partition_grouped as
+(
+select subject_id, hadm_id, stay_id, min(starttime) as starttime, max(endtime) as endtime
+    , count(*) as doses, antibiotic_name, min(isolated_case) as isolated_case
+from abx_partition
+group by subject_id, hadm_id, stay_id, antibiotic_name, abx_num
+order by subject_id, hadm_id, stay_id, starttime
+)
+
+, ab_tbl as
 (
   select
-      abx.subject_id, abx.hadm_id, abx.stay_id
-    , abx.antibiotic
-    , abx.starttime AS antibiotic_time
-    -- date is used to match microbiology cultures with only date available
-    , DATETIME_TRUNC(abx.starttime, DAY) AS antibiotic_date
-    , abx.stoptime AS antibiotic_stoptime
-    -- create a unique identifier for each patient antibiotic
-    , ROW_NUMBER() OVER
-    (
-      PARTITION BY subject_id
-      ORDER BY starttime, stoptime, antibiotic
-    ) AS ab_id
-  from `physionet-data.mimic_derived.antibiotic` abx
+        ie.subject_id, ie.hadm_id, ie.stay_id
+      , ie.intime, ie.outtime
+      , case when ab.isolated_case = 0 then ab.antibiotic_name else null end as antibiotic_name
+      , case when ab.isolated_case = 0 then ab.starttime else null end as antibiotic_time
+      --, ab.isolated_case
+      --, abx.endtime
+  from `physionet-data.mimic_icu.icustays` ie
+  left join abx_partition_grouped ab
+      on ie.hadm_id = ab.hadm_id and ie.stay_id = ab.stay_id
 )
+
+-- Find the microbiology events
 , me as
 (
-  select micro_specimen_id
-    -- the following columns are identical for all rows of the same micro_specimen_id
-    -- these aggregates simply collapse duplicates down to 1 row
-    , MAX(subject_id) AS subject_id
-    , MAX(hadm_id) AS hadm_id
-    , CAST(MAX(chartdate) AS DATE) AS chartdate
-    , MAX(charttime) AS charttime
-    , MAX(spec_type_desc) AS spec_type_desc
+  select subject_id, hadm_id
+    , chartdate, charttime
+    , spec_type_desc
     , max(case when org_name is not null and org_name != '' then 1 else 0 end) as PositiveCulture
-  from `physionet-data.mimic_hosp.microbiologyevents`
-  group by micro_specimen_id
+  from  `physionet-data.mimic_hosp.microbiologyevents`  
+  group by subject_id, hadm_id, chartdate, charttime, spec_type_desc
 )
--- culture followed by an antibiotic
-, me_then_ab AS
+
+, ab_fnl as
 (
   select
-    ab_tbl.subject_id
-    , ab_tbl.hadm_id
-    , ab_tbl.stay_id
-    , ab_tbl.ab_id
-    
-    , me72.micro_specimen_id
-    , coalesce(me72.charttime, CAST(me72.chartdate AS DATETIME)) as last72_charttime
-    , me72.positiveculture as last72_positiveculture
-    , me72.spec_type_desc as last72_specimen
-
-    -- we will use this partition to select the earliest culture before this abx
-    -- this ensures each antibiotic is only matched to a single culture
-    -- and consequently we have 1 row per antibiotic
-    , ROW_NUMBER() OVER
-    (
-      PARTITION BY ab_tbl.subject_id, ab_tbl.ab_id
-      ORDER BY me72.chartdate, me72.charttime NULLS LAST
-    ) AS micro_seq
+      ab_tbl.stay_id, ab_tbl.intime, ab_tbl.outtime
+    , ab_tbl.antibiotic_name
+    , ab_tbl.antibiotic_time
+    , coalesce(me.charttime,me.chartdate) as culture_charttime
+    , me.positiveculture as positiveculture
+    , me.spec_type_desc as specimen
+    , case
+      when coalesce(antibiotic_time,coalesce(me.charttime,me.chartdate)) is null
+        then 0
+      else 1 end as suspected_infection
+    , least(antibiotic_time, coalesce(me.charttime,me.chartdate)) as t_suspicion
   from ab_tbl
-  -- abx taken after culture, but no more than 72 hours after
-  LEFT JOIN me me72
-    on ab_tbl.subject_id = me72.subject_id
+  left join me 
+    on ab_tbl.hadm_id = me.hadm_id
+    and ab_tbl.antibiotic_time is not null
     and
     (
-      (
       -- if charttime is available, use it
-          me72.charttime is not null
-      and ab_tbl.antibiotic_time > me72.charttime
-      and ab_tbl.antibiotic_time <= DATETIME_ADD(me72.charttime, INTERVAL 72 HOUR) 
+      (
+          ab_tbl.antibiotic_time >= datetime_sub(me.charttime, interval 24 hour)
+      and ab_tbl.antibiotic_time <= datetime_add(me.charttime, interval 72 hour)
+
       )
       OR
       (
       -- if charttime is not available, use chartdate
-          me72.charttime is null
-      and antibiotic_date >= me72.chartdate
-      and antibiotic_date <= DATE_ADD(me72.chartdate, INTERVAL 3 DAY)
+          me.charttime is null
+      and ab_tbl.antibiotic_time >= datetime_sub(me.chartdate, interval 24 hour)
+      and ab_tbl.antibiotic_time < datetime_add(me.chartdate, interval 96 hour) --  Note this is 96 hours to include cases of when antibiotics are given 3 days after chart date of culture
       )
     )
 )
-, ab_then_me AS
+
+-- select only the unique times for suspicion of infection
+, unique_times as 
 (
-  select
-      ab_tbl.subject_id
-    , ab_tbl.hadm_id
-    , ab_tbl.stay_id
-    , ab_tbl.ab_id
-    
-    , me24.micro_specimen_id
-    , COALESCE(me24.charttime, CAST(me24.chartdate AS DATETIME)) as next24_charttime
-    , me24.positiveculture as next24_positiveculture
-    , me24.spec_type_desc as next24_specimen
-
-    -- we will use this partition to select the earliest culture before this abx
-    -- this ensures each antibiotic is only matched to a single culture
-    -- and consequently we have 1 row per antibiotic
-    , ROW_NUMBER() OVER
-    (
-      PARTITION BY ab_tbl.subject_id, ab_tbl.ab_id
-      ORDER BY me24.chartdate, me24.charttime NULLS LAST
-    ) AS micro_seq
-  from ab_tbl
-  -- culture in subsequent 24 hours
-  LEFT JOIN me me24
-    on ab_tbl.subject_id = me24.subject_id
-    and
-    (
-      (
-          -- if charttime is available, use it
-          me24.charttime is not null
-      and ab_tbl.antibiotic_time >= DATETIME_SUB(me24.charttime, INTERVAL 24 HOUR)  
-      and ab_tbl.antibiotic_time < me24.charttime
-      )
-      OR
-      (
-          -- if charttime is not available, use chartdate
-          me24.charttime is null
-      and ab_tbl.antibiotic_date >= DATE_SUB(me24.chartdate, INTERVAL 1 DAY)
-      and ab_tbl.antibiotic_date <= me24.chartdate
-      )
-    )
+select stay_id, t_suspicion, count(*) as repeats from ab_fnl
+group by stay_id, t_suspicion
+order by stay_id, t_suspicion
 )
-SELECT
-ab_tbl.subject_id
-, ab_tbl.stay_id
-, ab_tbl.hadm_id
-, ab_tbl.ab_id
-, ab_tbl.antibiotic
-, ab_tbl.antibiotic_time
 
-, CASE
-  WHEN last72_specimen IS NULL AND next24_specimen IS NULL
-    THEN 0
-  ELSE 1 
-  END AS suspected_infection
--- time of suspected infection:
---    (1) the culture time (if before antibiotic)
---    (2) or the antibiotic time (if before culture)
-, CASE
-  WHEN last72_specimen IS NULL AND next24_specimen IS NULL
-    THEN NULL
-  ELSE COALESCE(last72_charttime, antibiotic_time)
-  END AS suspected_infection_time
-
-, COALESCE(last72_charttime, next24_charttime) AS culture_time
-
--- the specimen that was cultured
-, COALESCE(last72_specimen, next24_specimen) AS specimen
-
--- whether the cultured specimen ended up being positive or not
-, COALESCE(last72_positiveculture, next24_positiveculture) AS positive_culture
-
-FROM ab_tbl
-LEFT JOIN ab_then_me ab2me
-    ON ab_tbl.subject_id = ab2me.subject_id
-    AND ab_tbl.ab_id = ab2me.ab_id
-    AND ab2me.micro_seq = 1
-LEFT JOIN me_then_ab me2ab
-    ON ab_tbl.subject_id = me2ab.subject_id
-    AND ab_tbl.ab_id = me2ab.ab_id
-    AND me2ab.micro_seq = 1
-;
