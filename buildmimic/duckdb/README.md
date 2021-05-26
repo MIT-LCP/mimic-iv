@@ -5,15 +5,17 @@ loads the data into the appropriate tables for
 [DuckDB](https://duckdb.org/).
 DuckDB, like SQLite, is serverless and
 stores all information in a single file.
-Unlike SQLite which is an OLTP database,
-DuckDB is an OLAP database and therefore optimized for analytical queries,
-which results in faster queries for researchers using MIMIC-IV over SQLite.
+Unlike SQLite, an OLTP database,
+DuckDB is an OLAP database, and therefore optimized for analytical queries.
+This will result in faster queries for researchers using MIMIC-IV
+with DuckDB compared to SQLite.
 To learn more, please read their ["why duckdb"](https://duckdb.org/docs/why_duckdb)
 page.
 
 The instructions to load MIMIC-IV into a DuckDB
-only require DuckDB to be installed and
-for your computer to have a posix-compliant terminal shell,
+only require 
+1. DuckDB to be installed and
+2. for your computer to have a posix-compliant terminal shell,
 which is already found by default on any Mac OSX, Linux, or BSD installation.
 To use these instructions on Windows,
 you need a Unix command line environment,
