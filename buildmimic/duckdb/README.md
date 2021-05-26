@@ -13,13 +13,14 @@ To learn more, please read their ["why duckdb"](https://duckdb.org/docs/why_duck
 page.
 
 The instructions to load MIMIC-IV into a DuckDB
-only require 
+only require:
 1. DuckDB to be installed and
-2. for your computer to have a posix-compliant terminal shell,
-which is already found by default on any Mac OSX, Linux, or BSD installation.
+2. Your computer to have a POSIX-compliant terminal shell,
+   which is already found by default on any Mac OSX, Linux, or BSD installation.
+
 To use these instructions on Windows,
 you need a Unix command line environment,
-which you can install using
+which you can obtain by either installing
 [Windows Subsystem for Linux](https://docs.microsoft.com/en-us/windows/wsl/install-win10)
 or [Cygwin](https://www.cygwin.com/).
 
