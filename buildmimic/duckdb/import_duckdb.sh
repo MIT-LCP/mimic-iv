@@ -26,7 +26,7 @@ die () { yell "$*"; exit 111; }
 try () { "$@" || die "Exiting. Failed to run: \"$*\""; }
 
 usage () {
-	die "
+    die "
 USAGE: ./import_duckdb.sh mimic_data_dir [output_db]
 WHERE:
     mimic_data_dir        directory that contains csv.tar.gz or csv files
@@ -553,17 +553,17 @@ make_table_name () {
     TABLE_NAME=${BASENAME%%.*}
     # strip basename (e.g., ./icu/hello.csv.gz -> ./icu)
     PATHNAME=${1%/*}
-	# strip leading directories from PATHNAME (e.g. ./icu -> icu)
-	DIRNAME=${PATHNAME##*/}
-	TABLE_NAME="mimic_$DIRNAME.$TABLE_NAME"
+    # strip leading directories from PATHNAME (e.g. ./icu -> icu)
+    DIRNAME=${PATHNAME##*/}
+    TABLE_NAME="mimic_$DIRNAME.$TABLE_NAME"
 }
 
 
 # load data into database
 find "$MIMIC_DIR" -type f -name '*.csv???' | while IFS= read -r FILE; do
-	make_table_name $FILE
+    make_table_name $FILE
     echo "Loading $FILE."
-	try duckdb "$OUTFILE" <<-EOSQL
+    try duckdb "$OUTFILE" <<-EOSQL
 		COPY $TABLE_NAME FROM '$FILE' (HEADER);
 EOSQL
     echo "Finished loading $FILE."
